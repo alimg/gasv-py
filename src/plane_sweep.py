@@ -1,18 +1,24 @@
 import heapq
+import logging
 import math
 import os
 
-from PIL import Image, ImageDraw
 from bintrees import FastAVLTree
 
 from src import gasv_input
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(format='%(asctime)s|%(levelname)s: %(message)s')
+logger.setLevel(logging.INFO)
+
 INTERSECTION = 0
 BEND = 1
 END = 2
-START = -1
+START = 3
 
-MIN_INTERSECTIONS = 4
+
+def norm2(a):
+    return (a[1], -a[0])
 
 
 def dot(a, b):
@@ -72,6 +78,7 @@ class EventPointSchedule(object):
 
 
 def draw_polygons(name, reds, greens=[]):
+    from PIL import Image, ImageDraw
     maxX = max(p[0] for p in sum(reds, []))
     minX = min(p[0] for p in sum(reds, []))
     maxY = max(p[1] for p in sum(reds, []))
@@ -91,23 +98,38 @@ def draw_polygons(name, reds, greens=[]):
         drw.polygon(_rescale(p), (0, 255, 0, int(55 + 200 / len(greens))))
     del drw
 
-    os.makedirs("out", exist_ok=True)
-    img.save('out/%s.png' % (name), 'PNG')
+    img.save('%s.png' % (name), 'PNG')
 
 
 class SweepLineStatus(object):
-    def __init__(self):
+    def __init__(self, sweep_dir):
         self._tree = FastAVLTree()
+        self._sweep_dir = sweep_dir
 
-    def add_edge(self, s):
-        self._tree.insert(s, s)
+    def set_position(self, pos):
+        self._pos = pos
+        L0 = pos * self._sweep_dir
+        L1 = norm2(self._sweep_dir)
+        self._line = (L0, L1)
+
+    def add_edge(self, s, d):
+        self._tree.insert(dot(self._line, s), d)
+
+    def find(self, p):
+        return (self._tree.succ_item(dot(self._line, p)),
+                self._tree.prev_item(dot(self._line, p)))
+
+    def remove(self, p):
+        self._tree.remove(p)
 
 
 class PlaneSweep(object):
-    def __init__(self, sweep_dir):
+    def __init__(self, sweep_dir, min_intersections=4, output_directory=None):
         self._sweep_dir = sweep_dir
         self._schedule = EventPointSchedule(sweep_dir)
         self._intersections = []
+        self._min_intersections = min_intersections
+        self._output_directory = output_directory
 
     def add_polygon(self, polygon: gasv_input.Polygon):
         for i, e in enumerate(polygon.edges):
@@ -157,11 +179,7 @@ class PlaneSweep(object):
 
                     assert d <= dot(self._sweep_dir, P_i)
                     self._schedule.add_intersection(P_i)
-
-                    # print("intersect", P.poly.breakpoint.name, l[0].poly.breakpoint.name)
                     assert (P.poly != l[0].poly)
-                    # draw_polygons(P.poly.breakpoint.name + l[0].poly.breakpoint.name,
-                    #              P.poly.points, l[0].poly.points)
 
     def find_intersections(self):
         # L = SweepLineStatus(self._sweep_dir)
@@ -216,13 +234,11 @@ class PlaneSweep(object):
                 idxT = L.index(t)
 
                 concatx = A[idxT] + [P] + B[idxS]
-                concaty = A[idxS] + [P] + B[idxT]
+                # concaty = A[idxS] + [P] + B[idxT]
 
-                for x in concatx, concaty:
+                for x in (concatx,):
                     parents = set.union(Rb[idxS], Ra[idxT])
-                    if len(parents) >= MIN_INTERSECTIONS:
-                        print("end %s:" % len(parents))
-                        print(x)
+                    if len(parents) >= self._min_intersections:
                         self.report_intersection(parents, x)
                 if idxS < idxT:
                     idxS, idxT = idxT, idxS
@@ -247,9 +263,7 @@ class PlaneSweep(object):
 
                 x = A[idxT] + [P] + B[idxS]
                 parents = set.union(Rb[idxS], Ra[idxT])
-                if len(parents) >= MIN_INTERSECTIONS:  # and x[0] == x[-1]
-                    print("intersect %s:" % len(parents))
-                    print(x)
+                if len(parents) >= self._min_intersections:
                     self.report_intersection(parents, x)
                 A_s = A[idxS]
                 A[idxS] = [P]
@@ -257,6 +271,7 @@ class PlaneSweep(object):
                 A[idxT] = A_s + [P]
                 B[idxT] = [P]
 
+                # Update region tracking status
                 r_a = Ra[idxS]
                 r_b = Rb[idxS]
                 Ra[idxS] = (Ra[idxS] | (Rb[idxT] - Ra[idxT])) - (Ra[idxT] - Rb[idxT])
@@ -265,18 +280,28 @@ class PlaneSweep(object):
                 Rb[idxT] = (Rb[idxT] | (r_a - r_b)) - (r_b - r_a)
 
     def report_intersection(self, parents, points):
-        self._intersections += (parents, points)
-        draw_polygons("#".join([p.breakpoint.name for p in parents]),
-                      [p.points for p in parents], [points])
+        parent_names = sorted([p.breakpoint.name for p in parents])
+        logger.info("Intersection: region=%s, reads=%s", points, " ".join(parent_names))
+        self._intersections.append((parents, points))
+        if self._output_directory:
+            os.makedirs(self._output_directory, exist_ok=True)
+            draw_polygons(
+                os.path.join(self._output_directory, "#".join(parent_names)),
+                [p.points for p in parents], [points])
 
     def intersections(self):
         return self._intersections
 
 
-def find_intersections(breakpoints, sweep_dir):
-    ps = PlaneSweep(sweep_dir)
+def find_maximal_intersections(intersections):
+    # for R, p in intersections:
+    return intersections
+
+
+def find_intersections(breakpoints, sweep_dir, min_intersections, output_directory):
+    ps = PlaneSweep(sweep_dir, min_intersections, output_directory)
     for bp in breakpoints:
         ps.add_polygon(bp.polygon)
 
     ps.find_intersections()
-    return ps.intersections()
+    return find_maximal_intersections(ps.intersections())
